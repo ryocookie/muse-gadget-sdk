@@ -293,6 +293,36 @@ menu "Muse"
             per capture. devices/sdkconfig.muse-waveshare-p4-lcd35-camera
             turns it on with the sensor's settings.
 
+    config MUSE_WAKE_WORD
+        bool "Start a voice turn with a wake word"
+        depends on MUSE_ENABLED && SPIRAM && IDF_TARGET_ESP32S3
+        default n
+        help
+            Espressif's WakeNet (esp-sr) listens to the idle microphone, and
+            the wake word starts a voice turn as a press of the talk button
+            does. The turn ends after a short silence once something was
+            said, or quietly if nothing is. The button keeps working.
+            Pick the word with esp-sr's own options (CONFIG_SR_WN_WN10_HIMUSE
+            for "Hi/Hey Muse") and use a partition table with a "model"
+            partition (partitions_muse_wake.csv, 16 MB flash); the flash
+            step writes esp-sr's srmodels.bin there. About 520 KB of PSRAM,
+            17 KB of internal RAM and a few ms of CPU per 32 ms. It only
+            listens while Muse is idle and awake, not while it plays a reply
+            or rests on battery.
+
+    config MUSE_WAKE_WORD_AGGRESSIVE
+        bool "Wake on less certain matches"
+        depends on MUSE_WAKE_WORD
+        default y
+        help
+            WakeNet's DET_MODE_95 rather than DET_MODE_90: it answers to
+            quieter or less clear wake words, and wakes by mistake more often.
+
+    config MUSE_WAKE_WORD_ESP_SR
+        string
+        default "y" if MUSE_WAKE_WORD
+        default "n"
+
     config MUSE_CJK_FONT
         bool "Show Chinese, Japanese and Korean in captions"
         depends on MUSE_ENABLED

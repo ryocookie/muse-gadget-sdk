@@ -38,6 +38,9 @@
 #include "muse_settings.h"
 #include "muse_state.h"
 #include "muse_wifi.h"
+#if CONFIG_MUSE_WAKE_WORD
+#include "muse_wake.h"
+#endif
 #if CONFIG_MUSE_REALTIME_VOICE
 #include "muse_voice_call.h"
 #include "muse_voice_call_core.h"
@@ -74,6 +77,16 @@ static const char *TAG = "muse_voice";
 
 static QueueHandle_t s_queue;
 static uint32_t s_press_input_epoch;
+#if CONFIG_MUSE_WAKE_WORD
+#define WAKE_PRE_CHUNKS 10                          /* of the pre-roll: what was said just after the word */
+#define WAKE_SPEECH_DB 10.0f                        /* this far over the idle noise floor is speech */
+#define WAKE_END_CHUNKS 40                          /* 0.8 s of quiet after speech ends a woken turn */
+#define WAKE_NO_SPEECH_FRAMES (MUSE_AUDIO_RATE * 5) /* nothing said this long after waking: drop it */
+static bool s_wake_heard;     /* idle_capture() heard the wake word */
+static bool s_wake_turn;      /* the turn being recorded was started by it */
+static bool s_wake_spoke;     /* something was said in it */
+static float s_noise_db = -60.0f;   /* idle mic level, following quiet stretches */
+#endif
 static uint32_t s_press_mark;   /* the press's pending-call mark (muse_input_clear_call_pending) */
 static volatile bool s_monitor;
 static volatile float s_monitor_db = -100.0f;
@@ -199,6 +212,9 @@ static void pre_reset(void)
 {
     s_pre_fill = 0;
     s_settle = SETTLE_CHUNKS;
+#if CONFIG_MUSE_WAKE_WORD
+    muse_wake_reset();
+#endif
 }
 
 /* Stores one successful read in the pre-roll (or the isolated waking hold). */
@@ -230,6 +246,14 @@ static void idle_capture(void)
         s_settle--;
         return;
     }
+#if CONFIG_MUSE_WAKE_WORD
+    /* The floor drops at once to a quieter chunk and creeps up through louder ones. */
+    float db = muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK);
+    s_noise_db = db < s_noise_db ? db : s_noise_db + 0.02f * (db - s_noise_db);
+    if (muse_wake_feed(s_chunk, MUSE_AUDIO_CHUNK)) {
+        s_wake_heard = true;
+    }
+#endif
     pre_put();
 }
 
@@ -343,7 +367,14 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
             muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK);
         }
     } else {
-        for (size_t i = 0; i < s_pre_fill; i++) {
+        size_t first = 0;
+#if CONFIG_MUSE_WAKE_WORD
+        /* Woken: the pre-roll is mostly the wake word; keep what followed it. */
+        if (s_wake_turn && s_pre_fill > WAKE_PRE_CHUNKS) {
+            first = s_pre_fill - WAKE_PRE_CHUNKS;
+        }
+#endif
+        for (size_t i = first; i < s_pre_fill; i++) {
             pre_get(i, s_chunk);
             take(&st, s_chunk);
             n += MUSE_AUDIO_CHUNK;
@@ -352,6 +383,10 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
     size_t pre = n;
     bool released = false;
     size_t stop_at = MAX_FRAMES;
+#if CONFIG_MUSE_WAKE_WORD
+    int quiet = 0;
+    s_wake_spoke = false;
+#endif
     while (n + MUSE_AUDIO_CHUNK <= stop_at) {
         if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
             break;
@@ -391,6 +426,24 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
          * Capture runs 60-80 ms behind real time and people let go on their
          * last syllable, so keep going briefly after release.
          */
+#if CONFIG_MUSE_WAKE_WORD
+        /* Woken, there is no release: a pause after speech ends it. */
+        if (s_wake_turn) {
+            if (!released) {
+                if (muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK) > s_noise_db + WAKE_SPEECH_DB) {
+                    s_wake_spoke = true;
+                    quiet = 0;
+                } else {
+                    quiet++;
+                }
+                if ((s_wake_spoke && quiet >= WAKE_END_CHUNKS) || (!s_wake_spoke && n - pre >= WAKE_NO_SPEECH_FRAMES)) {
+                    released = true;
+                    stop_at = n;
+                }
+            }
+            continue;
+        }
+#endif
         if (!released && got_event(MUSE_PTT_UP)) {
             released = true;
             stop_at = n + TAIL_FRAMES < MAX_FRAMES ? n + TAIL_FRAMES : MAX_FRAMES;
@@ -1219,17 +1272,31 @@ static void voice_task(void *arg)
             }
             /* The 20 ms read paces this loop. */
             idle_capture();
-            if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
-                continue;
+#if CONFIG_MUSE_WAKE_WORD
+            s_wake_turn = false;
+            if (s_wake_heard) {
+                /* As a press that is never released (record() ends it on a pause). */
+                s_wake_heard = false;
+                ESP_LOGI(TAG, "wake word heard (noise floor %.0f dBFS)", s_noise_db);
+                muse_state_poke();
+                s_press_input_epoch = muse_input_call_epoch();
+                s_press_mark = 0;
+                s_wake_turn = true;
+            } else
+#endif
+            {
+                if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
+                    continue;
+                }
+                muse_state_poke();
+                if (ev.type != MUSE_PTT_DOWN || ev.epoch != muse_input_call_epoch()) {
+                    muse_input_clear_call_pending(ev.mark);
+                    continue;
+                }
+                s_press_input_epoch = ev.epoch;
+                s_press_mark = ev.mark;
+                wake = ev.wake;
             }
-            muse_state_poke();
-            if (ev.type != MUSE_PTT_DOWN || ev.epoch != muse_input_call_epoch()) {
-                muse_input_clear_call_pending(ev.mark);
-                continue;
-            }
-            s_press_input_epoch = ev.epoch;
-            s_press_mark = ev.mark;
-            wake = ev.wake;
         }
         bool ptt = muse_voice_ptt_enabled();
         if (wake && !(ptt ? ptt_held_on_waking() : held_on_waking())) {
@@ -1265,6 +1332,20 @@ static void voice_task(void *arg)
         char why[96];
         bool ok = record(pending_down, &held, why, sizeof(why));
         pending_down = false;
+#if CONFIG_MUSE_WAKE_WORD
+        if (s_wake_turn) {
+            s_wake_turn = false;
+            if (ok && !s_wake_spoke) {
+                /* Woken by mistake, or nothing followed: drop it without a word. */
+                ESP_LOGI(TAG, "nothing said after the wake word");
+                muse_hatch_turn_cancel();
+                drop_rec();
+                pre_reset();
+                go_idle("");
+                continue;
+            }
+        }
+#endif
         if (short_press(held) && !wake) {
             muse_hatch_turn_cancel();
             drop_rec();
@@ -1298,13 +1379,21 @@ esp_err_t muse_voice_start(QueueHandle_t queue)
 {
     s_queue = queue;
     s_pre = heap_caps_malloc(PRE_CHUNKS * sizeof(pre_chunk_t), MUSE_BIG_CAPS);
+#if CONFIG_MUSE_WAKE_WORD
+    muse_wake_init();   /* without a model, the button still works */
+#endif
     if (!s_pre || muse_audio_init(muse_settings_volume(), muse_settings_mic_gain()) != ESP_OK) {
         muse_state_set_mode(MUSE_MODE_ERROR);
         muse_state_set_caption("AUDIO INIT FAILED");
         return ESP_FAIL;
     }
     /* Stack in PSRAM if there is any (this task never writes flash) to spare internal RAM for Wi-Fi/BLE. */
-    if (xTaskCreatePinnedToCoreWithCaps(voice_task, "muse_voice", 6144, NULL, 6, NULL, MUSE_AUDIO_CORE,
+#if CONFIG_MUSE_WAKE_WORD
+#define VOICE_STACK (16 * 1024)   /* WakeNet's detect() runs on it */
+#else
+#define VOICE_STACK 6144
+#endif
+    if (xTaskCreatePinnedToCoreWithCaps(voice_task, "muse_voice", VOICE_STACK, NULL, 6, NULL, MUSE_AUDIO_CORE,
                                         MUSE_BIG_CAPS) != pdPASS) {
         /* Without the task nothing would ever rest the codecs, which
          * muse_audio_init() left open: on the Watcher that's ~33 mA. */

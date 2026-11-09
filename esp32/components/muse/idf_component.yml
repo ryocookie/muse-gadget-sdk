@@ -21,6 +21,11 @@ dependencies:
     version: "^1.8"
     rules:
       - if: "$CONFIG{MUSE_VIDEO_MDNS} == \"y\""
+  # The wake word's WakeNet (muse_wake.c).
+  espressif/esp-sr:
+    version: "~2.6.1"
+    rules:
+      - if: "$CONFIG{MUSE_WAKE_WORD_ESP_SR} == \"y\""
   lvgl/lvgl:
     version: "9.5.0"
     public: true

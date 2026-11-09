@@ -1,0 +1,26 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# partitions_muse.csv plus esp-sr's "model" partition for the wake word
+# (CONFIG_MUSE_WAKE_WORD), on 16 MB flash. Everything before it is unchanged,
+# so NVS (Wi-Fi and the pairing) survives switching to this table.
+# Name,    Type, SubType, Offset,   Size,    Flags
+nvs,       data, nvs,     0x11000,  0xC000,
+otadata,   data, ota,     0x1D000,  0x2000,
+phy_init,  data, phy,     0x1F000,  0x1000,
+ota_0,     app,  ota_0,   0x20000,  4M,
+ota_1,     app,  ota_1,   0x420000, 4M,
+prod_data, data, 0x40,    0x820000, 0x1000,
+prod_bak,  data, 0x41,    0x821000, 0x1000,
+model,     data, spiffs,  0x830000, 2M,
