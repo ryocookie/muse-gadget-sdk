@@ -18,6 +18,8 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_wn_iface.h"
 #include "esp_wn_models.h"
 #include "model_path.h"
@@ -28,17 +30,14 @@
 static const char *TAG = "muse_wake";
 
 static const esp_wn_iface_t *s_wn;
-static model_iface_data_t *s_model;
+static model_iface_data_t *volatile s_model;   /* set last, once the rest is ready */
 static int16_t *s_buf;        /* one detect() chunk, interleaved if the model wants more channels */
 static size_t s_chunk;        /* frames per detect() */
 static size_t s_have;
 static int s_channels;
 
-bool muse_wake_init(void)
+static bool load(void)
 {
-    if (s_model) {
-        return true;
-    }
     srmodel_list_t *models = esp_srmodel_init("model");
     char *name = models ? esp_srmodel_filter(models, ESP_WN_PREFIX, NULL) : NULL;
     if (!name) {
@@ -70,15 +69,32 @@ bool muse_wake_init(void)
         s_wn->destroy(model);
         return false;
     }
-    s_model = model;
     ESP_LOGI(TAG, "listening for \"%s\" (%s, %u frames x %d ch per check)", s_wn->get_word_name(model, 1), name,
              (unsigned)s_chunk, s_channels);
+    __atomic_store_n(&s_model, model, __ATOMIC_RELEASE);
     return true;
+}
+
+static void load_task(void *arg)
+{
+    (void)arg;
+    load();
+    vTaskDelete(NULL);
+}
+
+void muse_wake_start(void)
+{
+    /* Internal stack (plain xTaskCreate): see muse_wake.h. Freed once it's done. */
+    if (xTaskCreate(load_task, "muse_wake", 16 * 1024, NULL, 3, NULL) != pdPASS &&
+        xTaskCreate(load_task, "muse_wake", 10 * 1024, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "no internal RAM to load the wake word model: button only");
+    }
 }
 
 bool muse_wake_feed(const int16_t *pcm, size_t frames)
 {
-    if (!s_model) {
+    model_iface_data_t *model = __atomic_load_n(&s_model, __ATOMIC_ACQUIRE);
+    if (!model) {
         return false;
     }
     bool heard = false;
@@ -94,7 +110,7 @@ bool muse_wake_feed(const int16_t *pcm, size_t frames)
         frames -= take;
         if (s_have == s_chunk) {
             s_have = 0;
-            if (s_wn->detect(s_model, s_buf) > 0) {
+            if (s_wn->detect(model, s_buf) > 0) {
                 heard = true;
             }
         }
@@ -104,8 +120,9 @@ bool muse_wake_feed(const int16_t *pcm, size_t frames)
 
 void muse_wake_reset(void)
 {
+    model_iface_data_t *model = __atomic_load_n(&s_model, __ATOMIC_ACQUIRE);
     s_have = 0;
-    if (s_model && s_wn->clean) {
-        s_wn->clean(s_model);
+    if (model && s_wn->clean) {
+        s_wn->clean(model);
     }
 }

@@ -31,8 +31,11 @@
 extern "C" {
 #endif
 
-/* Loads the model. False if there is none (the board then works by button only). */
-bool muse_wake_init(void);
+/* Loads the model on a short-lived task of its own: esp-sr maps the "model"
+ * partition, which freezes the flash cache, and that needs a stack in
+ * internal RAM (the voice task's is in PSRAM). Until it's loaded, and if
+ * there is no model, muse_wake_feed() hears nothing and the button works. */
+void muse_wake_start(void);
 
 /* Feeds 16 kHz mono PCM; true when the wake word has just been heard. */
 bool muse_wake_feed(const int16_t *pcm, size_t frames);
