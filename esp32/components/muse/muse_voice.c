@@ -1216,6 +1216,13 @@ static void run_call(bool ptt, size_t waking_chunks)
 static void voice_task(void *arg)
 {
     bool pending_down = false;
+#if CONFIG_MUSE_WAKE_WORD
+    /* Here, not in muse_voice_start(): loading the model takes more stack than
+     * the main task has, and a second or so the boot shouldn't wait on.
+     * Without a model, the button still works. */
+    ESP_LOGI(TAG, "loading the wake word model");
+    muse_wake_init();
+#endif
     muse_audio_selftest();
     for (;;) {
         bool wake = false;
@@ -1379,9 +1386,6 @@ esp_err_t muse_voice_start(QueueHandle_t queue)
 {
     s_queue = queue;
     s_pre = heap_caps_malloc(PRE_CHUNKS * sizeof(pre_chunk_t), MUSE_BIG_CAPS);
-#if CONFIG_MUSE_WAKE_WORD
-    muse_wake_init();   /* without a model, the button still works */
-#endif
     if (!s_pre || muse_audio_init(muse_settings_volume(), muse_settings_mic_gain()) != ESP_OK) {
         muse_state_set_mode(MUSE_MODE_ERROR);
         muse_state_set_caption("AUDIO INIT FAILED");
