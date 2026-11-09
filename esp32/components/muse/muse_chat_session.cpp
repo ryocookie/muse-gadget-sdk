@@ -228,6 +228,7 @@ struct msg_t {
     tts_t tts;
     uint32_t pcm_start;      /* where its speech starts in the reply audio */
     uint32_t pcm_frames;     /* how long it is; 0 until the MP3 has all arrived */
+    bool nospeak;            /* its speech failed: show it as text instead */
 };
 
 struct resampler_t {
@@ -1263,7 +1264,7 @@ static void post_chat(const char *text)
     }
     ESP_LOGI(TAG, "heard: \"%s\"", text);
     emit(MUSE_HATCH_EV_HEARD, text);
-    send_chat(text, "text", true);
+    send_chat(text, MUSE_CHAT_SPOKEN_MODALITY, true);
 }
 
 /* A typed turn: the text goes straight to the chat. */
@@ -1583,6 +1584,56 @@ static void on_chat_ack(stream_t *s)
 
 /* ---- Turn: speech ---- */
 
+#if CONFIG_MUSE_HATCH_SPEAK
+/* The VM's TTS stream, as the Linux client finds it: the newer path, then the older. */
+static const char *const TTS_PATHS[] = { "/api/voice/tts-stream", "/voice/tts-stream" };
+#define TTS_PATH_NONE 2
+static int s_tts_path;       /* index into TTS_PATHS; TTS_PATH_NONE once the VM turned both down */
+
+/* Asks the VM for message i's speech. False to show it as text instead. */
+static bool open_tts(int i)
+{
+    msg_t &m = s_turn.msgs[i];
+    if (s_tts_path >= TTS_PATH_NONE || m.nospeak || !m.id[0]) {
+        return false;
+    }
+    static const char HEX[] = "0123456789ABCDEF";
+    char path[64 + 3 * sizeof(m.id)];
+    size_t n = (size_t)snprintf(path, sizeof(path), "%s?message_id=", TTS_PATHS[s_tts_path]);
+    for (const char *p = m.id; *p && n + 4 <= sizeof(path); p++) {
+        unsigned char c = (unsigned char)*p;
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            path[n++] = (char)c;
+        } else {
+            path[n++] = '%';
+            path[n++] = HEX[c >> 4];
+            path[n++] = HEX[c & 15];
+        }
+    }
+    path[n] = '\0';
+    int64_t id = open_stream(K_TTS, "GET", path, nullptr, "audio/mpeg", nullptr, true);
+    stream_t *s = id ? find_stream(id) : nullptr;
+    if (!s) {
+        return false;
+    }
+    s->msg = i;
+    m.tts = TTS_ACTIVE;
+    m.pcm_start = s_turn.pcm_out;
+    m.pcm_frames = 0;
+    s_turn.tts_msg = i;
+    s_turn.silent = false;
+    s_turn.mp3_len = 0;
+    s_turn.mp3_ended = false;
+    s_turn.kbps = 0;
+    s_turn.down_rate = 0;
+    mp3dec_init(&s_turn.dec);
+    mark(M_TTS);
+    ESP_LOGI(TAG, "speaking message %s (%u chars)", m.id, (unsigned)m.len);
+    show_reply_start(m);
+    return true;
+}
+#endif
+
 static void start_tts(void)
 {
     if (s_turn.tts_msg >= 0) {
@@ -1593,6 +1644,11 @@ static void start_tts(void)
         if (m.tts != TTS_QUEUED) {
             continue;
         }
+#if CONFIG_MUSE_HATCH_SPEAK
+        if (open_tts(i)) {
+            return;
+        }
+#endif
         /*
          * Replies are text, shown at reading pace: silence in place of speech
          * paces the captions and ends the turn. To speak them instead, send
@@ -1637,12 +1693,32 @@ static void tts_data(const uint8_t *data, size_t len)
 static void tts_end(stream_t *s, bool ok)
 {
     int i = s->msg;
+#if CONFIG_MUSE_HATCH_SPEAK
+    int status = s->status;
+#endif
     close_stream(s);
     if (i < 0 || i != s_turn.tts_msg) {
         return;
     }
     if (ok) {
         s_turn.mp3_ended = true;   /* decode() drains the rest, then finishes */
+#if CONFIG_MUSE_HATCH_SPEAK
+    } else if (!s_turn.kbps && !s_turn.mp3_len) {
+        /* Nothing played: try the older path, or show the message as text. */
+        msg_t &m = s_turn.msgs[i];
+        if (status == 404 && s_tts_path == 0) {
+            s_tts_path = 1;
+        } else {
+            if (status == 401 || status == 403 || status == 404) {
+                s_tts_path = TTS_PATH_NONE;
+            }
+            m.nospeak = true;
+        }
+        ESP_LOGW(TAG, "no speech for message %s (HTTP %d)%s", m.id, status,
+                 s_tts_path >= TTS_PATH_NONE ? "; replies stay text this boot" : "");
+        m.tts = TTS_QUEUED;        /* start_tts takes it again */
+        s_turn.tts_msg = -1;
+#endif
     } else {
         s_turn.msgs[i].tts = TTS_FINISHED;
         s_turn.tts_msg = -1;

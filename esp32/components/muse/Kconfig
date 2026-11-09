@@ -433,6 +433,20 @@ menu "Muse"
             them. Needs PSRAM. Without it, voice notes go over Home Link's own
             session to its paired VM and replies are shown as text.
 
+    config MUSE_HATCH_SPEAK
+        bool "Speak replies with Muse's own text-to-speech"
+        depends on MUSE_HATCH
+        default n
+        help
+            Voice turns ask Muse for a spoken reply (output_modality "voice")
+            and fetch its speech from the VM's TTS stream
+            (/api/voice/tts-stream, or the older /voice/tts-stream) over the
+            voice session, then play it with captions following. It needs no
+            TTS service or API key of your own. A reply the VM won't speak is
+            shown as text at reading pace, as without this; once the VM turns
+            the TTS stream down (401, 403 or 404 on both paths), the rest of
+            the boot stays text. Typed turns are never spoken.
+
     config MUSE_REALTIME_VOICE
         bool "Live voice calls with Muse (experimental)"
         depends on (MUSE_HATCH || HOMEHUB_VOICE) && SPIRAM

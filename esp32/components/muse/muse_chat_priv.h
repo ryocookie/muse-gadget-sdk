@@ -79,8 +79,14 @@ static inline void muse_chat_reject(muse_chat_rejected_t *rejected, const char *
 #define MUSE_CHAT_SPOKEN_DEVICE "mcu-wearable"
 
 /* A voice note is a POST /chat/stream body: NOTE_HEAD, a base64 WAV, NOTE_TAIL. */
+/* Spoken turns ask for a reply Muse can speak when the board speaks replies. */
+#if CONFIG_MUSE_HATCH_SPEAK
+#define MUSE_CHAT_SPOKEN_MODALITY "voice"
+#else
+#define MUSE_CHAT_SPOKEN_MODALITY "text"
+#endif
 #define MUSE_HATCH_NOTE_HEAD \
-    "{\"message\":\"\",\"output_modality\":\"text\",\"device\":\"" MUSE_CHAT_SPOKEN_DEVICE "\"," \
+    "{\"message\":\"\",\"output_modality\":\"" MUSE_CHAT_SPOKEN_MODALITY "\",\"device\":\"" MUSE_CHAT_SPOKEN_DEVICE "\"," \
     "\"items\":[{\"type\":\"file\"," \
     "\"mime_type\":\"audio/wav\",\"filename\":\"voice_note.wav\",\"data_base64\":\""
 #define MUSE_HATCH_NOTE_TAIL "\"}]}"
